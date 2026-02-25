@@ -5,15 +5,18 @@ define([
   './mapsInfoWindows/LocationInfoWindowShortList', './mapsInfoWindows/LocationInfoWindowSummary',
   'dojo/json', 'dojo/text!/public/js/p3/resources/surveillancemap/flyaways.json', 'dijit/form/CheckBox', 'dijit/ColorPalette',
   '../util/PathJoin', 'dojo/request', 'dojo/_base/lang',
-  'https://maps.googleapis.com/maps/api/js?key=AIzaSyAo6Eq83tcpiWufvVpw_uuqdoRfWbFXfQ8&sensor=false&libraries=drawing'
+  'leaflet/dist/leaflet-src'
 ], function (
   declare, WidgetBase, on, OnDijitClickMixin, _WidgetsInTemplateMixin,
   dom, domClass, Templated, DtlTemplated, domConstruct, domStyle, mouse,
   Template, LocationInfoWindowSingle,
   LocationInfoWindowShortList, LocationInfoWindowSummary,
   JSON, flyawaysData, CheckBox, ColorPalette,
-  PathJoin, xhr, lang
+  PathJoin, xhr, lang,
+  L
 ) {
+  // Leaflet's UMD build may attach to window.L when it detects define.amd
+  L = L || window.L;
 
   return declare([WidgetBase, Templated, _WidgetsInTemplateMixin], {
     baseClass: 'MapsCanvas',
@@ -23,7 +26,6 @@ define([
     index: 0,
     state: null,
     map: null,
-    infoWindows: [],
     markers: [],
     prevalenceData: [],
     overlays: {},
@@ -34,8 +36,12 @@ define([
     defaultMarkerColor: '#FE7569',
     defaultMapOptions: {
       backgroundColor: '#E7F1FA',
-      mapTypeId: google.maps.MapTypeId.TERRAIN,
       scaleControl: true
+    },
+    tileLayerUrl: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+    tileLayerOptions: {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      maxZoom: 19
     },
     flywayJSON: [],
 
@@ -76,14 +82,10 @@ define([
     },
 
     resetMapToDefault: function () {
-      this.map.setCenter(this.initialCenter);
-      this.map.setZoom(this.initialZoomLevel);
-      this.map.setMapTypeId(this.defaultMapOptions.mapTypeId);
+      this.map.setView(this.initialCenter, this.initialZoomLevel);
 
-      // Close all the info  windows
-      for (let infoWindow of this.infoWindows) {
-        infoWindow.close();
-      }
+      // Close all popups
+      this.map.closePopup();
     },
 
     partitionByYear: function () {
@@ -323,82 +325,132 @@ define([
         const colorDisplay = document.getElementById(colorDisplayId);
         const colorDisplayStyle = window.getComputedStyle(colorDisplay);
         const color = colorDisplayStyle.getPropertyValue('background-color');
-        // Get points for given region
+        // Get points for given region, sorted by defined order
         const points = parent.flywayJSON.find(f => {
           return f.name === region;
-        }).points;
+        }).points.slice().sort((a, b) => a.order - b.order);
 
-        // Convert locations into LatLng object
-        const mapPoints = points.map(p => new google.maps.LatLng(p.latitude, p.longitude));
+        // Normalize longitudes so consecutive segments take the shortest path
+        // (fixes antimeridian crossing for flyways like East Asia/Australasia)
+        const mapPoints = [];
+        for (var i = 0; i < points.length; i++) {
+          var lng = points[i].longitude;
+          if (i > 0) {
+            var prevLng = mapPoints[i - 1][1];
+            while (lng - prevLng > 180) lng -= 360;
+            while (prevLng - lng > 180) lng += 360;
+          }
+          mapPoints.push([points[i].latitude, lng]);
+        }
 
-        const overlay = new google.maps.Polygon({
-          paths: mapPoints,
-          strokeColor: color,
-          strokeOpacity: 0.5,
-          strokeWeight: 2,
+        var polyStyle = {
+          color: color,
+          opacity: 0.5,
+          weight: 2,
           fillColor: color,
           fillOpacity: 0.5
-        });
+        };
 
-        // Add to the map
-        overlay.setMap(parent.map);
+        // Create a wrapping layer group that dynamically adds/removes
+        // polygon copies as the user pans across world boundaries
+        var overlay = L.layerGroup();
+        overlay._bvbrcBasePoints = mapPoints;
+        overlay._bvbrcPolyStyle = polyStyle;
+        overlay._bvbrcCopies = {};
+
+        function updateWrappedCopies() {
+          var bounds = parent.map.getBounds();
+          var minOffset = Math.floor(bounds.getWest() / 360);
+          var maxOffset = Math.ceil(bounds.getEast() / 360);
+
+          // Remove copies that are no longer in view
+          for (var key in overlay._bvbrcCopies) {
+            var off = parseInt(key, 10);
+            if (off < minOffset || off > maxOffset) {
+              overlay.removeLayer(overlay._bvbrcCopies[key]);
+              delete overlay._bvbrcCopies[key];
+            }
+          }
+
+          // Add copies that are now in view
+          for (var o = minOffset; o <= maxOffset; o++) {
+            if (!overlay._bvbrcCopies[o]) {
+              var shift = o * 360;
+              var shifted = overlay._bvbrcBasePoints.map(function (p) { return [p[0], p[1] + shift]; });
+              overlay._bvbrcCopies[o] = L.polygon(shifted, overlay._bvbrcPolyStyle);
+              overlay.addLayer(overlay._bvbrcCopies[o]);
+            }
+          }
+        }
+
+        overlay.addTo(parent.map);
+        updateWrappedCopies();
+        overlay._bvbrcMoveHandler = updateWrappedCopies;
+        parent.map.on('moveend', updateWrappedCopies);
         parent.overlays[region] = overlay;
       } else {
-        parent.overlays[region].setMap(null);
+        // Clean up the move handler and remove the layer
+        if (parent.overlays[region] && parent.overlays[region]._bvbrcMoveHandler) {
+          parent.map.off('moveend', parent.overlays[region]._bvbrcMoveHandler);
+        }
+        parent.map.removeLayer(parent.overlays[region]);
         delete parent.overlays[region];
       }
+    },
+
+    // Create a Leaflet DivIcon with SVG marker and optional label
+    _createLeafletDivIcon: function (count, color, label) {
+      var scale = count < 10 ? 1 : count < 100 ? 1.5 : count < 1000 ? 2 : 2.5;
+      var baseWidth = 20;
+      var baseHeight = 34;
+      var width = Math.round(baseWidth * scale);
+      var height = Math.round(baseHeight * scale);
+
+      var svgHtml = '<svg xmlns="http://www.w3.org/2000/svg" width="' + width + '" height="' + height + '" viewBox="-12 -42 24 44">' +
+        '<path d="M 0,0 C -2,-20 -10,-22 -10,-30 A 10,10 0 1,1 10,-30 C 10,-22 2,-20 0,0 z" ' +
+        'fill="' + color + '" fill-opacity="1" stroke="#000" stroke-width="1"/>' +
+        '</svg>';
+
+      var labelHtml = '';
+      if (label) {
+        labelHtml = '<span style="position:absolute;top:0;left:0;width:' + width + 'px;height:' + Math.round(height * 0.75) + 'px;' +
+          'display:flex;align-items:center;justify-content:center;' +
+          'font-size:' + Math.round(10 * scale) + 'px;font-weight:bold;color:#000;pointer-events:none;">' +
+          label + '</span>';
+      }
+
+      return L.divIcon({
+        className: 'surveillance-marker-icon',
+        html: svgHtml + labelHtml,
+        iconSize: [width, height],
+        iconAnchor: [Math.round(width / 2), height],
+        popupAnchor: [0, -height]
+      });
     },
 
     // Changes the icon color based on percentage number for positive tests
     showHidePercent: function () {
       const isChecked = this.percentageCheckBox.checked;
-      if (isChecked) {
-        // Show percentage/color gradient
-        // domStyle.set("fluPercents", 'display', "block");
-
-        for (let { marker, prevalence } of this.markers) {
-          let icon = marker.getIcon();
-          const percentage = prevalence === null ? 0 : parseFloat(prevalence);
-          icon.fillColor = percentage > 50 ? '#FF0000' :
+      for (var m = 0; m < this.markers.length; m++) {
+        var entry = this.markers[m];
+        var color;
+        if (isChecked) {
+          var percentage = entry.prevalence === null ? 0 : parseFloat(entry.prevalence);
+          color = percentage > 50 ? '#FF0000' :
             percentage > 25 ? '#E86500' :
               percentage > 15 ? '#DC950D' :
                 percentage > 7 ? '#FFFF00' :
                   percentage > 0 ? '#869832' :
                     '#00FF00';
-          marker.setIcon(icon);
-          google.maps.event.addListener(marker, 'mouseout', function () {
-            marker.setIcon(icon);
-          });
+        } else {
+          color = this.defaultMarkerColor;
         }
-      } else {
-        // Hide percentage/color gradient
-        // domStyle.set("fluPercents", 'display', "none");
-
-        // Reset marker colors back to default
-        for (let { marker } of this.markers) {
-          let icon = marker.getIcon();
-          icon.fillColor = this.defaultMarkerColor;
-          marker.setIcon(icon);
-          google.maps.event.addListener(marker, 'mouseout', function () {
-            marker.setIcon(icon);
-          });
+        var icon = this._createLeafletDivIcon(entry.count, color, entry.label);
+        entry.icon = icon;
+        for (var key in entry.copies) {
+          entry.copies[key].setIcon(icon);
         }
       }
-    },
-
-    // Create a marker icon with a size fit to the count and selected color
-    createMarkerIcon: function (count, color = this.defaultMarkerColor) {
-      const scale = count < 10 ? 1 : count < 100 ? 1.5 : count < 1000 ? 2 : 2.5;
-
-      return {
-        path: 'M 0,0 C -2,-20 -10,-22 -10,-30 A 10,10 0 1,1 10,-30 C 10,-22 2,-20 0,0 z',
-        fillColor: color,
-        fillOpacity: 1,
-        strokeColor: '#000',
-        strokeWeight: 1,
-        scale: scale,
-        labelOrigin: new google.maps.Point(0, -28)
-      };
     },
 
     createInfoWindowContent: function (items) {
@@ -445,37 +497,57 @@ define([
     },
 
     addMarkerToMap: function (location, showCount) {
-      const latitude = location.latitude.toFixed(5);
-      const longitude = location.longitude.toFixed(5);
+      const latitude = parseFloat(location.latitude.toFixed(5));
+      const longitude = parseFloat(location.longitude.toFixed(5));
       const count = location.items.length;
 
-      const latLng = new google.maps.LatLng(latitude, longitude);
-      const icon = this.createMarkerIcon(count);
       const markerLabel = showCount ? count.toString() : '';
-      const anchorPoint = count < 10 ? -7 : count < 100 ? -3 : count < 10000 ? -6 : -7;
+      const icon = this._createLeafletDivIcon(count, this.defaultMarkerColor, markerLabel);
       const { infoContent, prevalence } = this.createInfoWindowContent(location.items);
 
-      const marker = new google.maps.Marker({
-        position: latLng,
-        labelAnchor: new google.maps.Point(anchorPoint, 33),
+      this.markers.push({
+        lat: latitude,
+        lng: longitude,
+        count: count,
         label: markerLabel,
         icon: icon,
-        map: this.map
+        infoContent: infoContent,
+        prevalence: prevalence,
+        copies: {}
       });
-      this.markers.push({ marker, prevalence });
+    },
 
-      const infoWindow = new google.maps.InfoWindow({
-        content: infoContent
-      });
-      this.infoWindows.push(infoWindow);
+    // Dynamically create/remove marker copies so pins wrap when panning
+    _updateMarkerWrapping: function () {
+      var bounds = this.map.getBounds();
+      var minOffset = Math.floor(bounds.getWest() / 360);
+      var maxOffset = Math.ceil(bounds.getEast() / 360);
 
-      marker.addListener('click', () => {
-        infoWindow.open({
-          anchor: marker,
-          map: this.map,
-          shouldFocus: false
-        });
-      });
+      for (var m = 0; m < this.markers.length; m++) {
+        var entry = this.markers[m];
+
+        // Remove copies no longer in view
+        for (var key in entry.copies) {
+          var off = parseInt(key, 10);
+          if (off < minOffset || off > maxOffset) {
+            this.map.removeLayer(entry.copies[key]);
+            delete entry.copies[key];
+          }
+        }
+
+        // Add copies now in view
+        for (var o = minOffset; o <= maxOffset; o++) {
+          if (!entry.copies[o]) {
+            var shift = o * 360;
+            var marker = L.marker([entry.lat, entry.lng + shift], { icon: entry.icon });
+            marker._bvbrcCount = entry.count;
+            marker._bvbrcLabel = entry.label;
+            marker.bindPopup(entry.infoContent, { maxWidth: 400, closeOnClick: false });
+            marker.addTo(this.map);
+            entry.copies[o] = marker;
+          }
+        }
+      }
     },
 
     startup: function () {
@@ -487,22 +559,24 @@ define([
       const mapData = this.mapData;
 
       if (mapData && mapData.locations) {
-        let minLatLong = new google.maps.LatLng(mapData.minimumLatitude, mapData.minimumLongitude);
-        let maxLatLong = new google.maps.LatLng(mapData.maximumLatitude, mapData.maximumLongitude);
+        let minLatLng = L.latLng(mapData.minimumLatitude, mapData.minimumLongitude);
+        let maxLatLng = L.latLng(mapData.maximumLatitude, mapData.maximumLongitude);
 
-        const bounds = new google.maps.LatLngBounds(minLatLong, maxLatLong);
+        const bounds = L.latLngBounds(minLatLng, maxLatLng);
         this.initialCenter = bounds.getCenter();
 
-        let options = this.defaultMapOptions;
-        options.center = this.initialCenter;
+        this.map = L.map(this.canvasId, {
+          center: this.initialCenter,
+          scaleControl: this.defaultMapOptions.scaleControl
+        });
 
-        this.map = new google.maps.Map(document.getElementById(this.canvasId), options);
+        L.tileLayer(this.tileLayerUrl, this.tileLayerOptions).addTo(this.map);
+
         this.map.fitBounds(bounds);
 
-        google.maps.event.addListenerOnce(this.map, 'bounds_changed', lang.hitch(this, function () {
-          const initialZoomLevel = this.map.getZoom();
+        this.map.once('moveend', lang.hitch(this, function () {
+          var initialZoomLevel = this.map.getZoom();
           this.initialZoomLevel = initialZoomLevel;
-          this.map.setZoom(initialZoomLevel);
         }));
 
         this.flywayJSON = JSON.parse(flyawaysData);
@@ -574,6 +648,10 @@ define([
         for (let location of mapData.locations) {
           this.addMarkerToMap(location, mapData.showCount);
         }
+
+        // Initial marker placement and dynamic wrapping on pan
+        this._updateMarkerWrapping();
+        this.map.on('moveend', lang.hitch(this, this._updateMarkerWrapping));
       }
     }
   });
