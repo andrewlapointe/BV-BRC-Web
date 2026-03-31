@@ -1,0 +1,25 @@
+#surveillance-maps-container {
+    display: flex;
+    flex-direction: row;
+    margin: 0.5em 5px 0 5px;
+    height: auto;
+}
+
+h3 {
+    margin-bottom: 0.5em;
+}
+section#map {
+    width: 80%;
+}
+
+section#settings {
+    width: 20%;
+}
+
+/* Flyway Section */
+/* div#flywayDiv {
+    display: flex;
+    flex-wrap: wrap;
+    flex-direction: column;
+
+} */

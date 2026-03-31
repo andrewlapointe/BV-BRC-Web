@@ -1,19 +1,11 @@
-<div style="margin-left: 5px; margin-right: 5px;">
-    <div class="third left">
-        <div class="section">
-            <h3 class="section-title close"><span class="wrap">Information</span></h3>
-            <p>The markers on the map below show the locations of the selected surveillance records. The number inside a
-                marker indicates the number of records found at that location. Each marker can be clicked to provide
-                additional details about the records at that location, including the percent positive samples at that
-                location. Be aware that the percent of flu-positive samples may be affected by sampling and/or reporting
-                bias. When more than 20 records are found at a single location, a summary of the records is given.</p>
-            <br>
-            <p> The controls on the map can be used to zoom in or out or switch to a satellite view. The map can be
-                dragged to move to navigate to different areas </p>
-        </div>
+<div >
+    <div id="surveillance-maps-container">
 
-        <div class="section">
-            <h3 class="section-title close"><span class="wrap">Flu-positive Samples</span></h3>
+
+    <section id="settings" class="">
+        <h3>Settings</h3>
+        <div class="settings-subsection">
+            <h4 class="">Flu-positive Samples</h4>
             <div>
                 <div>
                     <input data-dojo-type="dijit/form/CheckBox"
@@ -54,8 +46,8 @@
             </div>
         </div>
 
-        <div class="section">
-            <h3 class="section-title close"><span class="wrap">Highlight Flyways</span></h3>
+        <div class="settings-subsection">
+            <h4 class="">Highlight Flyways</h4>
             <div>
                 <p>The flyways of wild birds can be superimposed on the map using the "Highlight Flyways" option.</p>
                 </br>
@@ -64,7 +56,7 @@
         </div>
 
         <div class="section" id="partition-section">
-            <h3 class="section-title close"><span class="wrap">Partition</span></h3>
+            <h4 class="section-title close">Partition</h4>
             <div>
                 <p>Partition all surveillance samples that map to these hosts by time interval.</p>
                 <div>
@@ -143,11 +135,15 @@
                 </style>
             </div>
         </div>
-    </div>
+    </section>
 
-    <div class="two-third right">
+    <section id="map" class="">
+        <h3 class="">Map
+                <div class="infobox iconbox infobutton dialoginfo" data-dojo-attach-event="onClick:showInfoDialog" style="display:inline-block; cursor:pointer;">
+                    <i class="fa icon-info-circle fa" title="click to open info dialog"></i>
+                </div>
+            </h3>
         <div class="section" style="margin: 0px 5px; ">
-            <h3 class="section-title close"><span class="wrap">Map</span></h3>
             <div id="surveillanceMapCanvas" style="width: 100%; height: 600px;">
                 Loading Surveillance Data Map...
             </div>
@@ -157,5 +153,6 @@
                 </button>
             </div>
         </div>
+    </section>
     </div>
 </div>

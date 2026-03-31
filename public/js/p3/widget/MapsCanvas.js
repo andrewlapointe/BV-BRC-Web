@@ -5,7 +5,8 @@ define([
   './mapsInfoWindows/LocationInfoWindowShortList', './mapsInfoWindows/LocationInfoWindowSummary',
   'dojo/json', 'dojo/text!/public/js/p3/resources/surveillancemap/flyaways.json', 'dijit/form/CheckBox', 'dijit/ColorPalette',
   '../util/PathJoin', 'dojo/request', 'dojo/_base/lang',
-  'leaflet/dist/leaflet-src'
+  'leaflet/dist/leaflet-src', 'dijit/Dialog',
+  'xstyle/css!../resources/surveillancemap/surveillancemap.css'
 ], function (
   declare, WidgetBase, on, OnDijitClickMixin, _WidgetsInTemplateMixin,
   dom, domClass, Templated, DtlTemplated, domConstruct, domStyle, mouse,
@@ -13,7 +14,7 @@ define([
   LocationInfoWindowShortList, LocationInfoWindowSummary,
   JSON, flyawaysData, CheckBox, ColorPalette,
   PathJoin, xhr, lang,
-  L
+  L, Dialog
 ) {
   // Leaflet's UMD build may attach to window.L when it detects define.amd
   L = L || window.L;
@@ -44,6 +45,24 @@ define([
       maxZoom: 19
     },
     flywayJSON: [],
+    infoDialog: null,
+    infoDialogContent: '<p>The markers on the map show the locations of the selected surveillance records. ' +
+      'The number inside a marker indicates the number of records found at that location. ' +
+      'Each marker can be clicked to provide additional details about the records at that location, ' +
+      'including the percent positive samples at that location.</p>',
+
+    showInfoDialog: function () {
+      if (!this.infoDialog) {
+        this.infoDialog = new Dialog({
+          title: 'Surveillance Data Map',
+          content: this.infoDialogContent,
+          'class': 'helpModal',
+          draggable: true,
+          style: 'max-width: 400px;'
+        });
+      }
+      this.infoDialog.show();
+    },
 
     _setStateAttr: function (state) {
       this._set('state', state);
